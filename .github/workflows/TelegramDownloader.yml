@@ -68,7 +68,7 @@ jobs:
 
       - name: 🚀 Proxy discovery (if needed)
         id: find_proxy
-        if: steps.load_proxy.outputs.selected_proxy == ''
+        if: false
         run: |
           echo "═══════════════════════════════════════════════════════════════"
           echo "🔍 Initializing proxy discovery engine..."
