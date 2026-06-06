@@ -1,22 +1,22 @@
-name: Download File from Telegram
+name: Download & Split Telegram File
 
 on:
-  workflow_dispatch:  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
     inputs:
       message_link:
-        description: 'Link to the Telegram message'
+        description: 'لینک پیام تلگرام (مثال: https://t.me/pypackeges/456)'
         required: true
         default: 'https://t.me/pypackeges/456'
-      download_path:
-        description: 'Path to save the downloaded file (e.g., ./downloads/)'
+      split_size:
+        description: 'اندازه هر قطعه (مثال: 90M, 100M, 50M)'
         required: true
-        default: './downloads/'
+        default: '90M'
 
 jobs:
-  download-telegram-file:
+  download-and-split:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code (for potential local scripts)
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -24,75 +24,77 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install python-telegram-bot
-        run: pip install python-telegram-bot
+      - name: Install dependencies
+        run: |
+          pip install telethon
 
-      - name: Create download directory
-        run: mkdir -p ${{ github.event.inputs.download_path }}
-
-      - name: Run Downloader Script
+      - name: Download file from Telegram
         env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           MESSAGE_LINK: ${{ github.event.inputs.message_link }}
-          DOWNLOAD_DIR: ${{ github.event.inputs.download_path }}
         run: |
           python - <<EOF
           import os
           import asyncio
-          from telegram import Bot
-          from telegram.ext import Application
           from telethon import TelegramClient
-          from telethon.tl.functions.messages import GetMessagesRequest
-          from telethon.tl.types import InputMessageID
-          import urllib.parse
-          import aiohttp
-          import aiofiles
+          from urllib.parse import urlparse
           
-          async def download_file_from_link(bot_token, api_id, api_hash, message_link, download_dir):
-              # Parse the message link
-              parsed_url = urllib.parse.urlparse(message_link)
-              path_parts = parsed_url.path.split('/')
-              if len(path_parts) < 3:
-                  print("Invalid message link format.")
+          async def download():
+              # Parse link
+              path = urlparse(os.environ['MESSAGE_LINK']).path
+              parts = path.strip('/').split('/')
+              if len(parts) < 2:
+                  print("Invalid link format")
                   return False
-              chat_username = path_parts[1]
-              message_id = int(path_parts[2])
+              chat = parts[0]
+              msg_id = int(parts[1])
+              
+              # Connect
+              client = TelegramClient('session', int(os.environ['API_ID']), os.environ['API_HASH'])
+              await client.start(bot_token=os.environ['BOT_TOKEN'])
+              
+              # Get message
+              entity = await client.get_entity(chat)
+              msg = await client.get_messages(entity, ids=msg_id)
+              
+              if msg and msg.document:
+                  # Get original filename
+                  fname = msg.file.name if msg.file.name else f"file_{msg_id}.bin"
+                  fpath = os.path.join("downloads", fname)
+                  os.makedirs("downloads", exist_ok=True)
+                  
+                  # Download
+                  await client.download_media(msg, file=fpath)
+                  print(f"Downloaded: {fpath}")
+                  return True
+              else:
+                  print("No document found")
+                  return False
           
-              # Using Telethon to get file info
-              async with TelegramClient('anon', api_id, api_hash) as client:
-                  await client.start(bot_token=bot_token)
-                  entity = await client.get_entity(chat_username)
-                  message = await client.get_messages(entity, ids=message_id)
-          
-                  if message and message.document:
-                      file_name = getattr(message.document.attributes[0], 'file_name', f"file_{message_id}.bin")
-                      file_path = os.path.join(download_dir, file_name)
-          
-                      # Download the file using Telethon
-                      await client.download_media(message, file=file_path)
-                      print(f"File downloaded successfully: {file_path}")
-                      return True
-                  else:
-                      print("No document found in the message.")
-                      return False
-          
-          # Run the async function
-          success = asyncio.run(download_file_from_link(
-              bot_token=os.environ['BOT_TOKEN'],
-              api_id=int(os.environ['API_ID']),
-              api_hash=os.environ['API_HASH'],
-              message_link=os.environ['MESSAGE_LINK'],
-              download_dir=os.environ['DOWNLOAD_DIR']
-          ))
-          
+          success = asyncio.run(download())
           if not success:
               exit(1)
           EOF
 
-      - name: Upload Download Artifact
+      - name: Split file into ${{ github.event.inputs.split_size }} chunks
+        run: |
+          cd downloads
+          # Find the downloaded file (there should be exactly one)
+          file=$(ls -1 | head -1)
+          echo "Splitting: $file"
+          # Split into chunks of specified size (e.g., 90M)
+          split -b ${{ github.event.inputs.split_size }} -d "$file" "${file}.part."
+          # Remove original file to save space
+          rm "$file"
+          # List generated parts
+          ls -lh
+          cd ..
+
+      - name: Upload all parts as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: downloaded-files
-          path: ${{ github.event.inputs.download_path }}
+          name: split-parts-90mb
+          path: downloads/
+          if-no-files-found: error
